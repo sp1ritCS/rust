@@ -221,7 +221,7 @@ use rustc_data_structures::owning_ref::OwningRef;
 use rustc_data_structures::svh::Svh;
 use rustc_data_structures::sync::MetadataRef;
 use rustc_errors::{struct_span_err, FatalError};
-use rustc_session::config::{self, CrateType};
+use rustc_session::config::{self, CrateType, CrateFlavor};
 use rustc_session::cstore::{CrateSource, MetadataLoader};
 use rustc_session::filesearch::{FileDoesntMatch, FileMatches, FileSearch};
 use rustc_session::search_paths::PathKind;
@@ -254,6 +254,7 @@ crate struct CrateLocator<'a> {
     pub triple: TargetTriple,
     pub filesearch: FileSearch<'a>,
     pub is_proc_macro: bool,
+    pub extern_flavor: Option<CrateFlavor>,
 
     // Mutable in-progress state or output.
     crate_rejections: CrateRejections,
@@ -268,23 +269,6 @@ crate struct CratePaths {
 impl CratePaths {
     crate fn new(name: Symbol, source: CrateSource) -> CratePaths {
         CratePaths { name, source }
-    }
-}
-
-#[derive(Copy, Clone, PartialEq)]
-crate enum CrateFlavor {
-    Rlib,
-    Rmeta,
-    Dylib,
-}
-
-impl fmt::Display for CrateFlavor {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match *self {
-            CrateFlavor::Rlib => "rlib",
-            CrateFlavor::Rmeta => "rmeta",
-            CrateFlavor::Dylib => "dylib",
-        })
     }
 }
 
@@ -340,6 +324,7 @@ impl<'a> CrateLocator<'a> {
                 sess.target_filesearch(path_kind)
             },
             is_proc_macro: false,
+            extern_flavor: sess.opts.externs.get(crate_name.as_str()).map(|entry| entry.kind).flatten(),
             crate_rejections: CrateRejections::default(),
         }
     }
@@ -399,11 +384,14 @@ impl<'a> CrateLocator<'a> {
                 None => return FileDoesntMatch,
                 Some(file) => file,
             };
-            let (hash, found_kind) = if file.starts_with(&rlib_prefix) && file.ends_with(".rlib") {
+            let (hash, found_kind) = if self.extern_flavor == Some(CrateFlavor::Rlib) ||
+              file.starts_with(&rlib_prefix) && file.ends_with(".rlib") {
                 (&file[(rlib_prefix.len())..(file.len() - ".rlib".len())], CrateFlavor::Rlib)
-            } else if file.starts_with(&rlib_prefix) && file.ends_with(".rmeta") {
+            } else if self.extern_flavor == Some(CrateFlavor::Rmeta) ||
+              file.starts_with(&rlib_prefix) && file.ends_with(".rmeta") {
                 (&file[(rlib_prefix.len())..(file.len() - ".rmeta".len())], CrateFlavor::Rmeta)
-            } else if file.starts_with(&dylib_prefix) && file.ends_with(&self.target.dll_suffix) {
+            } else if self.extern_flavor == Some(CrateFlavor::Dylib) ||
+              file.starts_with(&dylib_prefix) && file.ends_with(&self.target.dll_suffix) {
                 (
                     &file[(dylib_prefix.len())..(file.len() - self.target.dll_suffix.len())],
                     CrateFlavor::Dylib,
@@ -691,7 +679,7 @@ impl<'a> CrateLocator<'a> {
                 }
             };
 
-            if file.starts_with("lib") && (file.ends_with(".rlib") || file.ends_with(".rmeta"))
+            if self.extern_flavor.is_some() || file.starts_with("lib") && (file.ends_with(".rlib") || file.ends_with(".rmeta"))
                 || file.starts_with(&self.target.dll_prefix)
                     && file.ends_with(&self.target.dll_suffix)
             {
@@ -704,9 +692,11 @@ impl<'a> CrateLocator<'a> {
                 // rmetas as dylibs.
                 let loc_canon = loc.canonicalized().clone();
                 let loc = loc.original();
-                if loc.file_name().unwrap().to_str().unwrap().ends_with(".rlib") {
+                if self.extern_flavor == Some(CrateFlavor::Rlib) ||
+                  loc.file_name().unwrap().to_str().unwrap().ends_with(".rlib") {
                     rlibs.insert(loc_canon, PathKind::ExternFlag);
-                } else if loc.file_name().unwrap().to_str().unwrap().ends_with(".rmeta") {
+                } else if self.extern_flavor == Some(CrateFlavor::Rmeta) ||
+                  loc.file_name().unwrap().to_str().unwrap().ends_with(".rmeta") {
                     rmetas.insert(loc_canon, PathKind::ExternFlag);
                 } else {
                     dylibs.insert(loc_canon, PathKind::ExternFlag);

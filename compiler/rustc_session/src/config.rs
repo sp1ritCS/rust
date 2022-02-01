@@ -460,6 +460,11 @@ pub struct ExternEntry {
     /// This can be disabled with the `noprelude` option like
     /// `--extern noprelude:name`.
     pub add_prelude: bool,
+    /// Link the entry as a specific kind of dependency.
+    ///
+    /// If it is `None`, then rustc tries to automatically
+    /// detect the correct kind based on fil extension.
+    pub kind: Option<CrateFlavor>,
 }
 
 #[derive(Clone, Debug)]
@@ -475,6 +480,23 @@ pub enum ExternLocation {
     ///
     /// Added via `--extern prelude_name=some_file.rlib`
     ExactPaths(BTreeSet<CanonicalizedPath>),
+}
+
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub enum CrateFlavor {
+    Rlib,
+    Rmeta,
+    Dylib,
+}
+
+impl fmt::Display for CrateFlavor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match *self {
+            CrateFlavor::Rlib => "rlib",
+            CrateFlavor::Rmeta => "rmeta",
+            CrateFlavor::Dylib => "dylib",
+        })
+    }
 }
 
 /// Supplied source location of a dependency - for example in a build specification
@@ -519,7 +541,7 @@ impl Externs {
 
 impl ExternEntry {
     fn new(location: ExternLocation) -> ExternEntry {
-        ExternEntry { location, is_private_dep: false, add_prelude: false }
+        ExternEntry { location, is_private_dep: false, add_prelude: false, kind: None }
     }
 
     pub fn files(&self) -> Option<impl Iterator<Item = &CanonicalizedPath>> {
@@ -1963,18 +1985,27 @@ pub fn parse_externs(
 
         let mut is_private_dep = false;
         let mut add_prelude = true;
+        let mut crate_type: Option<CrateFlavor> = None;
         if let Some(opts) = options {
-            if !is_unstable_enabled {
-                early_error(
-                    error_format,
-                    "the `-Z unstable-options` flag must also be passed to \
-                     enable `--extern options",
-                );
-            }
             for opt in opts.split(',') {
                 match opt {
-                    "priv" => is_private_dep = true,
+                    "priv" => {
+                        if !is_unstable_enabled {
+                            early_error(error_format,
+                                "the `-Z unstable-options` flag must also be passed to \
+                                enable the `priv:` `--extern option",
+                            );
+                        }
+                        is_private_dep = true
+                    },
                     "noprelude" => {
+                        if !is_unstable_enabled {
+                            early_error(error_format,
+                                "the `-Z unstable-options` flag must also be passed to \
+                                enable the `noprelude:` `--extern option",
+                            );
+                        }
+
                         if let ExternLocation::ExactPaths(_) = &entry.location {
                             add_prelude = false;
                         } else {
@@ -1983,7 +2014,25 @@ pub fn parse_externs(
                                 "the `noprelude` --extern option requires a file path",
                             );
                         }
-                    }
+                    },
+                    "rlib" => {
+                        match crate_type {
+                            None => crate_type = Some(CrateFlavor::Rlib),
+                            Some(_) => early_error(error_format, "--extern can only take one kind of lib type")
+                        };
+                    },
+                    "meta" => {
+                        match crate_type {
+                            None => crate_type = Some(CrateFlavor::Rmeta),
+                            Some(_) => early_error(error_format, "--extern can only take one kind of lib type")
+                        };
+                    },
+                    "dylib" => {
+                        match crate_type {
+                            None => crate_type = Some(CrateFlavor::Dylib),
+                            Some(_) => early_error(error_format, "--extern can only take one kind of lib type")
+                        };
+                    },
                     _ => early_error(error_format, &format!("unknown --extern option `{}`", opt)),
                 }
             }
@@ -1994,6 +2043,11 @@ pub fn parse_externs(
         entry.is_private_dep |= is_private_dep;
         // If any flag is missing `noprelude`, then add to the prelude.
         entry.add_prelude |= add_prelude;
+        // If entry currently doesn't have a kind, but crate_type has, set it
+        // to crate_type.
+        if let Some(new_kind) = crate_type {
+            entry.kind.get_or_insert(new_kind);
+        }
     }
     Externs(externs)
 }
